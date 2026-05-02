@@ -264,10 +264,10 @@ async function processAllLeads(rawLeads, batchSize = 20) {
 
     console.log(`Running total: ${results.length} qualified leads`);
 
-    // Respect Gemini rate limits: 15 RPM for free tier
-    // Wait 5s between batches to stay under limit
+    // Rate limit: Gemini 2.5 Flash free tier = 10 RPM
+    // Wait 8s between batches to stay safely under limit
     if (i + batchSize < rawLeads.length) {
-      await sleep(5000);
+      await sleep(8000);
     }
   }
 

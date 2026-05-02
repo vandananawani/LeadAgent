@@ -263,31 +263,76 @@ async function logRun(stats) {
     "Saved", "Duration (s)", "Status",
   ];
 
+  const row = [[
+    stats.date,
+    stats.rawCount,
+    stats.afterAI,
+    stats.afterDedup,
+    stats.saved,
+    stats.durationSeconds,
+    stats.status,
+  ]];
+
   try {
     const auth = getAuth();
     const sheets = getSheetsClient(auth);
 
-    await ensureSheetTab(sheets, spreadsheetId, LOG_TAB, LOG_HEADERS);
+    // Try appending directly first — fastest path when tab already exists
+    try {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId,
+        range: `${LOG_TAB}!A1`,
+        valueInputOption: "RAW",
+        insertDataOption: "INSERT_ROWS",
+        requestBody: { values: row },
+      });
+      console.log(`[Sheets] Run logged → ${LOG_TAB}`);
+      return;
+    } catch (appendErr) {
+      // Tab doesn't exist yet — create it then retry
+      const msg = appendErr.message || "";
+      const isNotFound =
+        msg.includes("Unable to parse range") ||
+        msg.includes("not found") ||
+        msg.includes("Requested entity") ||
+        appendErr.response?.status === 400 ||
+        appendErr.response?.status === 404;
 
+      if (!isNotFound) throw appendErr; // Different error — rethrow
+    }
+
+    // Create the tab with headers
+    console.log(`[Sheets] Creating ${LOG_TAB} tab...`);
+    try {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: [{ addSheet: { properties: { title: LOG_TAB } } }],
+        },
+      });
+    } catch (createErr) {
+      // Tab might already exist (race condition) — ignore duplicate error
+      if (!createErr.message?.includes("already exists")) throw createErr;
+    }
+
+    // Write headers
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${LOG_TAB}!A1`,
+      valueInputOption: "RAW",
+      requestBody: { values: [LOG_HEADERS] },
+    });
+
+    // Now append the data row
     await sheets.spreadsheets.values.append({
       spreadsheetId,
       range: `${LOG_TAB}!A1`,
       valueInputOption: "RAW",
       insertDataOption: "INSERT_ROWS",
-      requestBody: {
-        values: [[
-          stats.date,
-          stats.rawCount,
-          stats.afterAI,
-          stats.afterDedup,
-          stats.saved,
-          stats.durationSeconds,
-          stats.status,
-        ]],
-      },
+      requestBody: { values: row },
     });
 
-    console.log(`[Sheets] Run logged → ${LOG_TAB}`);
+    console.log(`[Sheets] Run logged → ${LOG_TAB} (tab created)`);
   } catch (err) {
     console.warn(`[Sheets] Could not write run log: ${err.message}`);
   }
