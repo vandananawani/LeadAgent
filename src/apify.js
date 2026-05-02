@@ -24,15 +24,30 @@ function dispatchWebhook(body) {
     return;
   }
 
-  // Payload shape from our template:
-  // {"runId":"<id>","status":"<status>","datasetId":"<id>"}
-  const runId = payload?.runId;
-  const status = payload?.status;
+  console.log("[Apify/Webhook] Raw payload:", JSON.stringify(payload));
 
-  console.log(`[Apify/Webhook] Callback received — runId: ${runId}, status: ${status}`);
+  // Apify's default payload shape (when payloadTemplate is ignored):
+  //   { "resource": { "id": "...", "status": "...", "defaultDatasetId": "..." } }
+  // Our custom template shape (if it works):
+  //   { "runId": "...", "status": "...", "datasetId": "..." }
+  // Handle both so we're resilient regardless of which Apify sends.
+  const runId =
+    payload?.runId ||
+    payload?.resource?.id ||
+    payload?.actorRunId;
+
+  const status =
+    payload?.status ||
+    payload?.resource?.status;
+
+  const datasetId =
+    payload?.datasetId ||
+    payload?.resource?.defaultDatasetId;
+
+  console.log(`[Apify/Webhook] Parsed — runId: ${runId}, status: ${status}, datasetId: ${datasetId}`);
 
   if (!runId) {
-    console.warn("[Apify/Webhook] Payload missing runId — raw body:", JSON.stringify(payload));
+    console.warn("[Apify/Webhook] Could not extract runId from payload:", JSON.stringify(payload));
     return;
   }
 
@@ -46,7 +61,7 @@ function dispatchWebhook(body) {
   clearTimeout(entry.timer);
 
   if (status === "SUCCEEDED") {
-    entry.resolve({ runId, datasetId: payload.datasetId });
+    entry.resolve({ runId, datasetId });
   } else {
     entry.reject(new Error(`Apify run ended with status: ${status}`));
   }
