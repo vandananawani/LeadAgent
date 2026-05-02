@@ -14,7 +14,11 @@ const ACTOR_ID = "apify~google-search-scraper";
 
 const webhookRegistry = new Map(); // runId → { resolve, reject, timer }
 
-// Called by index.js server when POST /apify-webhook arrives
+// Called by index.js server when POST /apify-webhook arrives.
+// Apify fires the webhook multiple times:
+//   - Immediately on run start (resource exists but status may be RUNNING)
+//   - Again on completion (status = SUCCEEDED / FAILED / ABORTED)
+// We must ignore non-terminal calls and only resolve on a final status.
 function dispatchWebhook(body) {
   let payload;
   try {
@@ -26,28 +30,32 @@ function dispatchWebhook(body) {
 
   console.log("[Apify/Webhook] Raw payload:", JSON.stringify(payload));
 
-  // Apify's default payload shape (when payloadTemplate is ignored):
-  //   { "resource": { "id": "...", "status": "...", "defaultDatasetId": "..." } }
-  // Our custom template shape (if it works):
-  //   { "runId": "...", "status": "...", "datasetId": "..." }
-  // Handle both so we're resilient regardless of which Apify sends.
+  // Extract runId — handle both Apify default shape and our custom template
   const runId =
-    payload?.runId ||
     payload?.resource?.id ||
+    payload?.runId ||
     payload?.actorRunId;
 
   const status =
-    payload?.status ||
-    payload?.resource?.status;
+    payload?.resource?.status ||
+    payload?.status;
 
   const datasetId =
-    payload?.datasetId ||
-    payload?.resource?.defaultDatasetId;
+    payload?.resource?.defaultDatasetId ||
+    payload?.datasetId;
 
   console.log(`[Apify/Webhook] Parsed — runId: ${runId}, status: ${status}, datasetId: ${datasetId}`);
 
-  if (!runId) {
-    console.warn("[Apify/Webhook] Could not extract runId from payload:", JSON.stringify(payload));
+  if (!runId || runId.includes("{{")) {
+    console.warn("[Apify/Webhook] Invalid runId (template not interpolated or missing), ignoring");
+    return;
+  }
+
+  // If status is missing from the payload, Apify sent an incomplete webhook.
+  // Fetch the run status directly from the API instead of ignoring.
+  if (!status || !["SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"].includes(status)) {
+    console.log(`[Apify/Webhook] Status missing or non-terminal ("${status}") — fetching run status from API`);
+    fetchRunStatusAndDispatch(runId, datasetId);
     return;
   }
 
@@ -65,6 +73,55 @@ function dispatchWebhook(body) {
   } else {
     entry.reject(new Error(`Apify run ended with status: ${status}`));
   }
+}
+
+// Fetches the real run status from Apify API when the webhook payload is incomplete
+async function fetchRunStatusAndDispatch(runId, datasetIdFromWebhook) {
+  const token = process.env.APIFY_API_TOKEN;
+  const terminalStatuses = ["SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"];
+
+  // Poll until we get a terminal status (run may still be finishing)
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      const response = await axios.get(
+        `${APIFY_BASE}/actor-runs/${runId}?token=${token}`,
+        { timeout: 10000 }
+      );
+      const run = response.data?.data;
+      const status = run?.status;
+      const datasetId = datasetIdFromWebhook || run?.defaultDatasetId;
+
+      console.log(`[Apify/Webhook] API status check (attempt ${attempt + 1}): ${status}`);
+
+      if (!terminalStatuses.includes(status)) {
+        await sleep(3000);
+        continue;
+      }
+
+      // Now dispatch with real status
+      const entry = webhookRegistry.get(runId);
+      if (!entry) {
+        console.warn(`[Apify/Webhook] No waiter for runId ${runId} after status fetch`);
+        return;
+      }
+
+      webhookRegistry.delete(runId);
+      clearTimeout(entry.timer);
+
+      if (status === "SUCCEEDED") {
+        entry.resolve({ runId, datasetId });
+      } else {
+        entry.reject(new Error(`Apify run ended with status: ${status}`));
+      }
+      return;
+
+    } catch (err) {
+      console.error(`[Apify/Webhook] Status fetch attempt ${attempt + 1} failed: ${err.message}`);
+      await sleep(3000);
+    }
+  }
+
+  console.error(`[Apify/Webhook] Could not determine run status after 20 attempts`);
 }
 
 // Returns a Promise that resolves with {runId, datasetId} when Apify calls back.
