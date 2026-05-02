@@ -93,41 +93,9 @@ function getSheetsClient(auth) {
   return google.sheets({ version: "v4", auth });
 }
 
-// ─── Ensure Headers Exist ──────────────────────────────────────────────────────
+// ─── Ensure Leads Tab and Headers Exist ───────────────────────────────────────
 async function ensureHeaders(sheets, spreadsheetId) {
-  const range = `${SHEET_NAME}!A1:M1`;
-
-  try {
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range,
-    });
-
-    const existing = res.data.values?.[0] || [];
-    if (existing.length === 0) {
-      console.log("[Sheets] Writing headers...");
-      await sheets.spreadsheets.values.update({
-        spreadsheetId,
-        range,
-        valueInputOption: "RAW",
-        requestBody: { values: [HEADER_ROW] },
-      });
-    }
-  } catch (err) {
-    // Sheet tab might not exist — create it
-    if (err.message?.includes("Unable to parse range")) {
-      console.log("[Sheets] Creating 'Leads' sheet tab...");
-      await sheets.spreadsheets.batchUpdate({
-        spreadsheetId,
-        requestBody: {
-          requests: [{ addSheet: { properties: { title: SHEET_NAME } } }],
-        },
-      });
-      await ensureHeaders(sheets, spreadsheetId);
-    } else {
-      throw err;
-    }
-  }
+  await ensureSheetTab(sheets, spreadsheetId, SHEET_NAME, HEADER_ROW);
 }
 
 // ─── Fetch Existing Unique Keys (for dedup) ────────────────────────────────────
@@ -255,43 +223,55 @@ async function saveLeads(leads) {
   return totalInserted;
 }
 
+// ─── Ensure Sheet Tab Exists ──────────────────────────────────────────────────
+// Checks spreadsheet metadata for a tab by title. Creates it with headers if
+// missing. Returns a sheets client + confirmed tab name for callers to use.
+async function ensureSheetTab(sheets, spreadsheetId, tabTitle, headers) {
+  // Fetch spreadsheet metadata to check existing sheet titles
+  const meta = await sheets.spreadsheets.get({ spreadsheetId });
+  const existingTitles = (meta.data.sheets || []).map(
+    (s) => s.properties.title
+  );
+
+  if (!existingTitles.includes(tabTitle)) {
+    console.log(`[Sheets] Creating tab "${tabTitle}"...`);
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: tabTitle } } }],
+      },
+    });
+    // Write headers on the new tab
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${tabTitle}!A1`,
+      valueInputOption: "RAW",
+      requestBody: { values: [headers] },
+    });
+    console.log(`[Sheets] Tab "${tabTitle}" created with headers`);
+  }
+}
+
 // ─── Log Run to Sheet ──────────────────────────────────────────────────────────
 async function logRun(stats) {
   const spreadsheetId = process.env.GOOGLE_SHEETS_ID;
   if (!spreadsheetId) return;
 
+  const LOG_TAB = "RunLog";
+  const LOG_HEADERS = [
+    "Date", "Raw Scraped", "After AI", "After Dedup",
+    "Saved", "Duration (s)", "Status",
+  ];
+
   try {
     const auth = getAuth();
     const sheets = getSheetsClient(auth);
 
-    // Ensure Log sheet exists
-    const logSheetName = "RunLog";
-    try {
-      await sheets.spreadsheets.values.get({
-        spreadsheetId,
-        range: `${logSheetName}!A1`,
-      });
-    } catch {
-      await sheets.spreadsheets.batchUpdate({
-        spreadsheetId,
-        requestBody: {
-          requests: [{ addSheet: { properties: { title: logSheetName } } }],
-        },
-      });
-      // Write log headers
-      await sheets.spreadsheets.values.update({
-        spreadsheetId,
-        range: `${logSheetName}!A1:G1`,
-        valueInputOption: "RAW",
-        requestBody: {
-          values: [["Date", "Raw Scraped", "After AI", "After Dedup", "Saved", "Duration (s)", "Status"]],
-        },
-      });
-    }
+    await ensureSheetTab(sheets, spreadsheetId, LOG_TAB, LOG_HEADERS);
 
     await sheets.spreadsheets.values.append({
       spreadsheetId,
-      range: `${logSheetName}!A1`,
+      range: `${LOG_TAB}!A1`,
       valueInputOption: "RAW",
       insertDataOption: "INSERT_ROWS",
       requestBody: {
@@ -307,16 +287,13 @@ async function logRun(stats) {
       },
     });
 
-    console.log("[Sheets] Run logged to RunLog sheet");
+    console.log(`[Sheets] Run logged → ${LOG_TAB}`);
   } catch (err) {
     console.warn(`[Sheets] Could not write run log: ${err.message}`);
   }
 }
 
 // ─── Check If Today's Run Already Happened ────────────────────────────────────
-// Reads the RunLog sheet and returns true if a SUCCESS row exists for today.
-// Used on startup to catch the case where Render restarted the process after
-// the cron trigger time — we run immediately instead of waiting until tomorrow.
 async function hasRunToday() {
   const spreadsheetId = process.env.GOOGLE_SHEETS_ID;
   if (!spreadsheetId) return false;
@@ -326,6 +303,14 @@ async function hasRunToday() {
   try {
     const auth = getAuth();
     const sheets = getSheetsClient(auth);
+
+    // Check tab exists first — avoid confusing "entity not found" errors
+    const meta = await sheets.spreadsheets.get({ spreadsheetId });
+    const titles = (meta.data.sheets || []).map((s) => s.properties.title);
+    if (!titles.includes("RunLog")) {
+      console.log("[Sheets] RunLog tab does not exist yet — assuming no run today");
+      return false;
+    }
 
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId,
@@ -337,16 +322,15 @@ async function hasRunToday() {
       (row) => row[0] === today && row[6] === "SUCCESS"
     );
 
-    if (todaySuccess) {
-      console.log(`[Sheets] RunLog: today (${today}) already has a successful run`);
-    } else {
-      console.log(`[Sheets] RunLog: no successful run found for today (${today})`);
-    }
+    console.log(
+      todaySuccess
+        ? `[Sheets] RunLog: today (${today}) already has a successful run`
+        : `[Sheets] RunLog: no successful run found for today (${today})`
+    );
 
     return todaySuccess;
   } catch (err) {
-    // RunLog sheet doesn't exist yet (first ever run) — treat as not run
-    console.log(`[Sheets] Could not read RunLog (${err.message}) — assuming no run today`);
+    console.log(`[Sheets] hasRunToday check failed (${err.message}) — assuming no run today`);
     return false;
   }
 }

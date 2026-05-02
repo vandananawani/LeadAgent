@@ -24,10 +24,17 @@ function dispatchWebhook(body) {
     return;
   }
 
-  const runId = payload?.resource?.id || payload?.actorRunId;
-  const status = payload?.resource?.status || payload?.status;
+  // Payload shape from our template:
+  // {"runId":"<id>","status":"<status>","datasetId":"<id>"}
+  const runId = payload?.runId;
+  const status = payload?.status;
 
   console.log(`[Apify/Webhook] Callback received — runId: ${runId}, status: ${status}`);
+
+  if (!runId) {
+    console.warn("[Apify/Webhook] Payload missing runId — raw body:", JSON.stringify(payload));
+    return;
+  }
 
   const entry = webhookRegistry.get(runId);
   if (!entry) {
@@ -39,14 +46,13 @@ function dispatchWebhook(body) {
   clearTimeout(entry.timer);
 
   if (status === "SUCCEEDED") {
-    entry.resolve(runId);
+    entry.resolve({ runId, datasetId: payload.datasetId });
   } else {
     entry.reject(new Error(`Apify run ended with status: ${status}`));
   }
 }
 
-// Returns a Promise that resolves when dispatchWebhook() is called with this
-// runId, or rejects after timeoutMs. No server is created here.
+// Returns a Promise that resolves with {runId, datasetId} when Apify calls back.
 function waitForWebhook(expectedRunId, timeoutMs = 600000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -128,21 +134,29 @@ async function runApifyActor(queries, webhookUrl = null) {
   // Build URL — attach webhook to the run request if we have a public URL
   let url = `${APIFY_BASE}/acts/${ACTOR_ID}/runs?token=${token}`;
   if (webhookUrl) {
-    // Apify accepts webhooks as a query param (base64-encoded JSON array)
-    const webhooks = Buffer.from(
-      JSON.stringify([
-        {
-          eventTypes: ["ACTOR.RUN.SUCCEEDED", "ACTOR.RUN.FAILED", "ACTOR.RUN.ABORTED"],
-          requestUrl: webhookUrl,
-          payloadTemplate: JSON.stringify({
-            actorRunId: "{{resource.id}}",
-            resource: "{{resource}}",
-            status: "{{resource.status}}",
-          }),
-        },
-      ])
-    ).toString("base64");
-    url += `&webhooks=${webhooks}`;
+    // IMPORTANT: payloadTemplate must be a RAW STRING — not JSON.stringify()'d.
+    // Apify interpolates {{variable}} markers server-side at delivery time.
+    // If the template is double-encoded the braces arrive as literals and
+    // nothing gets substituted — which is exactly the bug we saw in prod.
+    // Only scalar fields are supported: resource.id, resource.status,
+    // resource.defaultDatasetId. Full-object {{resource}} does NOT work.
+    const payloadTemplate =
+      '{"runId":"{{resource.id}}","status":"{{resource.status}}","datasetId":"{{resource.defaultDatasetId}}"}';
+
+    const webhookConfig = [
+      {
+        eventTypes: [
+          "ACTOR.RUN.SUCCEEDED",
+          "ACTOR.RUN.FAILED",
+          "ACTOR.RUN.ABORTED",
+          "ACTOR.RUN.TIMED_OUT",
+        ],
+        requestUrl: webhookUrl,
+        payloadTemplate,
+      },
+    ];
+    const webhooks = Buffer.from(JSON.stringify(webhookConfig)).toString("base64");
+    url += `&webhooks=${encodeURIComponent(webhooks)}`;
     console.log(`[Apify] Webhook registered: ${webhookUrl}`);
   }
 
@@ -188,15 +202,18 @@ async function pollForCompletion(runId, timeoutMs = 600000) {
 }
 
 // ─── Fetch Dataset Results ─────────────────────────────────────────────────────
-async function fetchDatasetResults(runId) {
+async function fetchDatasetResults(runId, datasetId = null) {
   const token = process.env.APIFY_API_TOKEN;
 
-  console.log(`[Apify] Fetching dataset for run ${runId}...`);
+  // Use datasetId directly if we have it (comes from webhook payload).
+  // Falls back to run-based endpoint when using polling mode.
+  const endpoint = datasetId
+    ? `${APIFY_BASE}/datasets/${datasetId}/items?token=${token}&format=json&limit=500&clean=true`
+    : `${APIFY_BASE}/actor-runs/${runId}/dataset/items?token=${token}&format=json&limit=500&clean=true`;
 
-  const response = await axios.get(
-    `${APIFY_BASE}/actor-runs/${runId}/dataset/items?token=${token}&format=json&limit=500&clean=true`,
-    { timeout: 30000 }
-  );
+  console.log(`[Apify] Fetching dataset via ${datasetId ? "datasetId" : "runId"}...`);
+
+  const response = await axios.get(endpoint, { timeout: 30000 });
 
   const items = response.data;
   if (!Array.isArray(items)) throw new Error("Apify dataset returned non-array");
@@ -254,13 +271,15 @@ async function scrapeLeads(location = "India") {
   }
 
   // Wait for completion — webhook if we have a public URL, otherwise poll
+  let datasetId = null;
   if (webhookUrl) {
-    await waitForWebhook(runId);
+    const result = await waitForWebhook(runId);
+    datasetId = result.datasetId || null;
   } else {
     await pollForCompletion(runId);
   }
 
-  const rawLeads = await fetchDatasetResults(runId);
+  const rawLeads = await fetchDatasetResults(runId, datasetId);
 
   // Deduplicate raw results by URL before returning
   const seen = new Set();
