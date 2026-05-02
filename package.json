@@ -1,0 +1,21 @@
+{
+  "name": "cfo-lead-agent",
+  "version": "1.0.0",
+  "description": "Automated CFO lead generation agent using Apify + Gemini + Google Sheets",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --env-file=.env index.js",
+    "run-once": "node --env-file=.env index.js --run-once"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1",
+    "express": "^5.2.1",
+    "googleapis": "^128.0.0",
+    "node-cron": "^3.0.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
