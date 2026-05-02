@@ -154,6 +154,11 @@ async function callGemini(prompt) {
       maxOutputTokens: 8192,
       responseMimeType: "application/json",
     },
+    // Disable thinking mode — required for responseMimeType: "application/json"
+    // to work correctly with Gemini 2.5 Flash. Thinking + JSON mime type = 400 error.
+    thinkingConfig: {
+      thinkingBudget: 0,
+    },
   };
 
   const response = await axios.post(`${GEMINI_URL}?key=${key}`, body, {
