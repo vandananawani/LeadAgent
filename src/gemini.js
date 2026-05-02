@@ -152,12 +152,12 @@ async function callGemini(prompt) {
     generationConfig: {
       temperature: 0.1,
       maxOutputTokens: 8192,
-      responseMimeType: "application/json",
-    },
-    // Disable thinking mode — required for responseMimeType: "application/json"
-    // to work correctly with Gemini 2.5 Flash. Thinking + JSON mime type = 400 error.
-    thinkingConfig: {
-      thinkingBudget: 0,
+      // Note: responseMimeType removed — it conflicts with thinkingConfig on
+      // Gemini 2.5 Flash causing 400 errors. The extractLeadsFromText function
+      // handles raw text responses with 5 fallback strategies.
+      thinkingConfig: {
+        thinkingBudget: 0, // Disable thinking — faster, cheaper, no conflicts
+      },
     },
   };
 
