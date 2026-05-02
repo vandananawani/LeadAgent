@@ -152,12 +152,6 @@ async function callGemini(prompt) {
     generationConfig: {
       temperature: 0.1,
       maxOutputTokens: 8192,
-      // Note: responseMimeType removed — it conflicts with thinkingConfig on
-      // Gemini 2.5 Flash causing 400 errors. The extractLeadsFromText function
-      // handles raw text responses with 5 fallback strategies.
-      thinkingConfig: {
-        thinkingBudget: 0, // Disable thinking — faster, cheaper, no conflicts
-      },
     },
   };
 
@@ -216,6 +210,11 @@ async function processLeadBatch(leads, batchIndex) {
         err.response?.status === 429 ||
         err.message?.includes("quota") ||
         err.message?.includes("rate");
+
+      // Log full error body for debugging
+      if (err.response?.data) {
+        console.error(`[Gemini] Error response body:`, JSON.stringify(err.response.data));
+      }
 
       console.error(
         `[Gemini] Batch ${batchIndex} attempt ${attempt} failed: ${err.message}`
