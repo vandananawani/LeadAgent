@@ -224,31 +224,46 @@ async function saveLeads(leads) {
 }
 
 // ─── Ensure Sheet Tab Exists ──────────────────────────────────────────────────
-// Checks spreadsheet metadata for a tab by title. Creates it with headers if
-// missing. Returns a sheets client + confirmed tab name for callers to use.
+// Does NOT use spreadsheets.get (requires extra scope/permissions).
+// Instead tries to write directly and creates the tab only if that fails.
 async function ensureSheetTab(sheets, spreadsheetId, tabTitle, headers) {
-  // Fetch spreadsheet metadata to check existing sheet titles
-  const meta = await sheets.spreadsheets.get({ spreadsheetId });
-  const existingTitles = (meta.data.sheets || []).map(
-    (s) => s.properties.title
-  );
-
-  if (!existingTitles.includes(tabTitle)) {
-    console.log(`[Sheets] Creating tab "${tabTitle}"...`);
-    await sheets.spreadsheets.batchUpdate({
+  try {
+    // Try a lightweight read to check if tab exists
+    await sheets.spreadsheets.values.get({
       spreadsheetId,
-      requestBody: {
-        requests: [{ addSheet: { properties: { title: tabTitle } } }],
-      },
+      range: `${tabTitle}!A1`,
     });
-    // Write headers on the new tab
+    // Tab exists — nothing to do
+  } catch (err) {
+    const isNotFound =
+      err.message?.includes("Unable to parse range") ||
+      err.message?.includes("not found") ||
+      err.response?.status === 400 ||
+      err.response?.status === 404;
+
+    if (!isNotFound) throw err; // Unexpected error — rethrow
+
+    // Tab doesn't exist — create it
+    console.log(`[Sheets] Creating tab "${tabTitle}"...`);
+    try {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: [{ addSheet: { properties: { title: tabTitle } } }],
+        },
+      });
+    } catch (createErr) {
+      if (!createErr.message?.includes("already exists")) throw createErr;
+    }
+
+    // Write headers
     await sheets.spreadsheets.values.update({
       spreadsheetId,
       range: `${tabTitle}!A1`,
       valueInputOption: "RAW",
       requestBody: { values: [headers] },
     });
-    console.log(`[Sheets] Tab "${tabTitle}" created with headers`);
+    console.log(`[Sheets] Tab "${tabTitle}" created`);
   }
 }
 
@@ -349,14 +364,6 @@ async function hasRunToday() {
     const auth = getAuth();
     const sheets = getSheetsClient(auth);
 
-    // Check tab exists first — avoid confusing "entity not found" errors
-    const meta = await sheets.spreadsheets.get({ spreadsheetId });
-    const titles = (meta.data.sheets || []).map((s) => s.properties.title);
-    if (!titles.includes("RunLog")) {
-      console.log("[Sheets] RunLog tab does not exist yet — assuming no run today");
-      return false;
-    }
-
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId,
       range: "RunLog!A2:G1000",
@@ -375,6 +382,7 @@ async function hasRunToday() {
 
     return todaySuccess;
   } catch (err) {
+    // RunLog tab doesn't exist yet, or sheet not accessible — assume no run today
     console.log(`[Sheets] hasRunToday check failed (${err.message}) — assuming no run today`);
     return false;
   }
