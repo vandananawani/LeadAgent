@@ -3,7 +3,7 @@
 const axios = require("axios");
 
 const GEMINI_URL =
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
 
 // ─── Build Prompt ──────────────────────────────────────────────────────────────
 function buildPrompt(leads) {
