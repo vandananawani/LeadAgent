@@ -388,6 +388,73 @@ async function hasRunToday() {
   }
 }
 
+const RAW_SHEET_NAME = "Leads";
+const RAW_HEADER_ROW = [
+  "UniqueKey", "Name", "Role", "Category", "Company", "Source URL", "Snippet", "Date Added"
+];
+
+// ─── Save Raw Leads (no AI processing) ────────────────────────────────────────
+async function saveRawLeads(leads) {
+  const spreadsheetId = process.env.GOOGLE_SHEETS_ID;
+  if (!spreadsheetId) throw new Error("GOOGLE_SHEETS_ID is not set");
+
+  console.log(`[Sheets] Connecting to Google Sheets...`);
+
+  const auth = getAuth();
+  const sheets = getSheetsClient(auth);
+
+  // Ensure tab and headers exist
+  await ensureSheetTab(sheets, spreadsheetId, RAW_SHEET_NAME, RAW_HEADER_ROW);
+
+  // Fetch existing keys for dedup
+  const existingKeys = await getExistingKeys(sheets, spreadsheetId);
+
+  const today = new Date().toISOString().split("T")[0];
+
+  // Filter duplicates and build rows
+  const newRows = [];
+  for (const lead of leads) {
+    const key = generateDedupeKey(lead.name, lead.company);
+    if (existingKeys.has(key)) continue;
+    newRows.push([
+      key,
+      lead.name,
+      lead.role,
+      lead.category,
+      lead.company,
+      lead.source_url,
+      lead.snippet || "",
+      today,
+    ]);
+  }
+
+  console.log(`[Sheets] ${leads.length} leads → ${newRows.length} new after dedup`);
+
+  if (newRows.length === 0) {
+    console.log("[Sheets] Nothing new to insert.");
+    return 0;
+  }
+
+  // Insert in batches of 50
+  let inserted = 0;
+  for (let i = 0; i < newRows.length; i += 50) {
+    const batch = newRows.slice(i, i + 50);
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: `${RAW_SHEET_NAME}!A1`,
+      valueInputOption: "RAW",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: { values: batch },
+    });
+    inserted += batch.length;
+    console.log(`[Sheets] Inserted ${inserted}/${newRows.length}`);
+    if (i + 50 < newRows.length) await sleep(1000);
+  }
+
+  console.log(`[Sheets] ✅ Done. ${inserted} new leads saved.`);
+  return inserted;
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-module.exports = { saveLeads, logRun, hasRunToday, generateDedupeKey };
+module.exports = { saveLeads, saveRawLeads, logRun, hasRunToday, generateDedupeKey };
