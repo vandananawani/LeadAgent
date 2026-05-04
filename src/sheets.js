@@ -390,10 +390,13 @@ async function hasRunToday() {
 
 const RAW_SHEET_NAME = "Leads";
 const RAW_HEADER_ROW = [
-  "UniqueKey", "Name", "Role", "Category", "Company", "Source URL", "Snippet", "Date Added"
+  "UniqueKey", "Name", "Role", "Category", "Company",
+  "Company Size", "Turnover (INR Cr)",
+  "Email 1", "Email 2", "Email 3",
+  "Source URL", "Snippet", "Date Added"
 ];
 
-// ─── Save Raw Leads (no AI processing) ────────────────────────────────────────
+// ─── Save Raw Leads ────────────────────────────────────────────────────────────
 async function saveRawLeads(leads) {
   const spreadsheetId = process.env.GOOGLE_SHEETS_ID;
   if (!spreadsheetId) throw new Error("GOOGLE_SHEETS_ID is not set");
@@ -403,15 +406,11 @@ async function saveRawLeads(leads) {
   const auth = getAuth();
   const sheets = getSheetsClient(auth);
 
-  // Ensure tab and headers exist
   await ensureSheetTab(sheets, spreadsheetId, RAW_SHEET_NAME, RAW_HEADER_ROW);
-
-  // Fetch existing keys for dedup
   const existingKeys = await getExistingKeys(sheets, spreadsheetId);
 
   const today = new Date().toISOString().split("T")[0];
 
-  // Filter duplicates and build rows
   const newRows = [];
   for (const lead of leads) {
     const key = generateDedupeKey(lead.name, lead.company);
@@ -422,6 +421,11 @@ async function saveRawLeads(leads) {
       lead.role,
       lead.category,
       lead.company,
+      lead.company_size || "Unknown",
+      lead.turnover || "Unknown",
+      lead.email1 || "",
+      lead.email2 || "",
+      lead.email3 || "",
       lead.source_url,
       lead.snippet || "",
       today,
@@ -435,7 +439,6 @@ async function saveRawLeads(leads) {
     return 0;
   }
 
-  // Insert in batches of 50
   let inserted = 0;
   for (let i = 0; i < newRows.length; i += 50) {
     const batch = newRows.slice(i, i + 50);
