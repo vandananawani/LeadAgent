@@ -1,8 +1,76 @@
 "use strict";
 
 const { scrapeLeads } = require("./apify");
-const { processAllLeads } = require("./gemini");
-const { saveLeads, logRun } = require("./sheets");
+const { saveRawLeads, logRun } = require("./sheets");
+
+// ─── Parse Raw Lead from Apify Result ─────────────────────────────────────────
+// Extracts name, role, company from the Google search result title/snippet
+function parseRawLead(raw) {
+  const title = raw.title || "";
+  const url = raw.url || "";
+  const snippet = raw.description || "";
+
+  // Title format examples:
+  // "Rajesh Mehta - CFO at Infra Solutions | LinkedIn"
+  // "Priya Shah – Finance Head, ABC Industries | LinkedIn"
+  // "VP Finance at XYZ Group - LinkedIn"
+
+  let name = "Unknown";
+  let role = "Finance Professional";
+  let company = "Unknown";
+
+  // Strip " | LinkedIn" and " - LinkedIn" from end
+  const cleanTitle = title
+    .replace(/\s*[\|–-]\s*LinkedIn.*$/i, "")
+    .replace(/\s*on LinkedIn.*$/i, "")
+    .trim();
+
+  // Pattern: "Name - Role at Company" or "Name – Role, Company"
+  const dashMatch = cleanTitle.match(/^(.+?)\s*[-–]\s*(.+?)\s+(?:at|@)\s+(.+)$/i);
+  if (dashMatch) {
+    name = dashMatch[1].trim();
+    role = dashMatch[2].trim();
+    company = dashMatch[3].trim();
+  } else {
+    // Pattern: "Name - Role | Company" (pipe separator)
+    const pipeMatch = cleanTitle.match(/^(.+?)\s*[-–]\s*(.+?)\s*[\|,]\s*(.+)$/i);
+    if (pipeMatch) {
+      name = pipeMatch[1].trim();
+      role = pipeMatch[2].trim();
+      company = pipeMatch[3].trim();
+    } else {
+      // Fallback: treat whole title as name, extract role from snippet
+      name = cleanTitle.split(/[-–|]/)[0].trim() || "Unknown";
+      // Try to find role in snippet
+      const roleMatch = snippet.match(/\b(CFO|Chief Financial Officer|Finance Head|VP Finance|Director Finance|Finance Director|Head of Finance|Finance Controller|Group CFO)\b/i);
+      if (roleMatch) role = roleMatch[1];
+      // Try to find company in snippet
+      const companyMatch = snippet.match(/(?:at|@)\s+([A-Z][^.]+(?:Ltd|Limited|Pvt|Group|Industries|Holdings|Inc)?)/);
+      if (companyMatch) company = companyMatch[1].trim();
+    }
+  }
+
+  // Clean up company — remove trailing punctuation
+  company = company.replace(/[.,|].*$/, "").trim();
+
+  // Determine role category
+  const titleLower = (role + " " + title).toLowerCase();
+  let category = "Finance Professional";
+  if (/\bcfo\b|chief financial/.test(titleLower)) category = "CFO";
+  else if (/vp finance|vice president finance/.test(titleLower)) category = "VP Finance";
+  else if (/finance head|head of finance/.test(titleLower)) category = "Finance Head";
+  else if (/finance director|director finance/.test(titleLower)) category = "Finance Director";
+  else if (/finance controller|controller/.test(titleLower)) category = "Finance Controller";
+
+  return {
+    name,
+    role,
+    company,
+    category,
+    source_url: url,
+    snippet: snippet.slice(0, 200),
+  };
+}
 
 // ─── Main Pipeline ─────────────────────────────────────────────────────────────
 async function runPipeline() {
@@ -23,11 +91,12 @@ async function runPipeline() {
   console.log("=".repeat(60));
   console.log(`[Pipeline] Starting CFO lead generation — ${today}`);
   console.log(`[Pipeline] Target location: ${location}`);
+  console.log("[Pipeline] Mode: Direct save (no AI processing)");
   console.log("=".repeat(60));
 
   try {
     // ── STEP 1: Scrape with Apify ──────────────────────────────
-    console.log("\n[Step 1/3] Scraping leads from Google via Apify...");
+    console.log("\n[Step 1/2] Scraping leads from Google via Apify...");
     const rawLeads = await scrapeLeads(location);
     stats.rawCount = rawLeads.length;
 
@@ -38,34 +107,27 @@ async function runPipeline() {
       return stats;
     }
 
-    console.log(`[Step 1/3] ✅ ${rawLeads.length} raw leads scraped\n`);
+    console.log(`[Step 1/2] ✅ ${rawLeads.length} raw leads scraped\n`);
 
-    // ── STEP 2: Process with Gemini ────────────────────────────
-    console.log("[Step 2/3] Processing leads with Gemini AI...");
-    const processedLeads = await processAllLeads(rawLeads, 20);
-    stats.afterAI = processedLeads.length;
+    // ── STEP 2: Parse + Save directly to Sheets ───────────────
+    console.log("[Step 2/2] Parsing and saving to Google Sheets...");
 
-    if (processedLeads.length === 0) {
-      console.warn("[Pipeline] Gemini returned 0 qualified leads. Aborting.");
-      stats.status = "EMPTY_AI";
-      await logRun({ ...stats, durationSeconds: elapsed(startTime) });
-      return stats;
-    }
+    const parsedLeads = rawLeads.map(parseRawLead);
+    stats.afterAI = parsedLeads.length;
 
-    // Sort by lead score descending
-    processedLeads.sort((a, b) => b.lead_score - a.lead_score);
+    // Print sample
+    console.log("\n  SAMPLE LEADS:");
+    parsedLeads.slice(0, 5).forEach((lead, i) => {
+      console.log(`  ${i + 1}. ${lead.name} — ${lead.role} @ ${lead.company}`);
+    });
+    console.log("");
 
-    console.log(`[Step 2/3] ✅ ${processedLeads.length} qualified leads after AI filtering\n`);
-    printLeadSummary(processedLeads);
-
-    // ── STEP 3: Save to Google Sheets ─────────────────────────
-    console.log("[Step 3/3] Saving to Google Sheets...");
-    const saved = await saveLeads(processedLeads);
-    stats.afterDedup = processedLeads.length;
+    const saved = await saveRawLeads(parsedLeads);
+    stats.afterDedup = parsedLeads.length;
     stats.saved = saved;
     stats.status = "SUCCESS";
 
-    console.log(`[Step 3/3] ✅ ${saved} new leads saved to Google Sheets\n`);
+    console.log(`[Step 2/2] ✅ ${saved} new leads saved to Google Sheets\n`);
 
   } catch (err) {
     console.error(`\n[Pipeline] ❌ Fatal error: ${err.message}`);
@@ -75,7 +137,6 @@ async function runPipeline() {
 
   stats.durationSeconds = elapsed(startTime);
 
-  // ── Log run stats ──────────────────────────────────────────
   try {
     await logRun(stats);
   } catch (logErr) {
@@ -86,44 +147,21 @@ async function runPipeline() {
   return stats;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 function elapsed(startTime) {
   return Math.floor((Date.now() - startTime) / 1000);
-}
-
-function printLeadSummary(leads) {
-  const cfoCount = leads.filter((l) => l.category === "CFO").length;
-  const fdmCount = leads.filter((l) => l.category === "Finance Decision Maker").length;
-  const avgScore = (leads.reduce((s, l) => s + l.lead_score, 0) / leads.length).toFixed(1);
-  const highScore = leads.filter((l) => l.lead_score >= 8).length;
-
-  console.log("─".repeat(40));
-  console.log(`  CFOs:                    ${cfoCount}`);
-  console.log(`  Finance Decision Makers: ${fdmCount}`);
-  console.log(`  Avg lead score:          ${avgScore}`);
-  console.log(`  High-quality (>=8):      ${highScore}`);
-  console.log("─".repeat(40));
-
-  // Print top 5 leads
-  console.log("\n  TOP LEADS:");
-  leads.slice(0, 5).forEach((lead, i) => {
-    console.log(
-      `  ${i + 1}. [${lead.lead_score}/10] ${lead.name} — ${lead.role} @ ${lead.company}`
-    );
-  });
-  console.log("");
 }
 
 function printFinalSummary(stats) {
   console.log("\n" + "=".repeat(60));
   console.log("[Pipeline] RUN COMPLETE");
   console.log("=".repeat(60));
-  console.log(`  Status:          ${stats.status}`);
-  console.log(`  Raw scraped:     ${stats.rawCount}`);
-  console.log(`  After AI filter: ${stats.afterAI}`);
-  console.log(`  New leads saved: ${stats.saved}`);
-  console.log(`  Duration:        ${stats.durationSeconds}s`);
+  console.log(`  Status:      ${stats.status}`);
+  console.log(`  Raw scraped: ${stats.rawCount}`);
+  console.log(`  Parsed:      ${stats.afterAI}`);
+  console.log(`  Saved:       ${stats.saved}`);
+  console.log(`  Duration:    ${stats.durationSeconds}s`);
   console.log("=".repeat(60) + "\n");
 }
 
 module.exports = { runPipeline };
+
