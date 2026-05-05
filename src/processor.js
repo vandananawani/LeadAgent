@@ -1,7 +1,7 @@
 "use strict";
 
 const axios = require("axios");
-const { scrapeLeads } = require("./apify");
+const { scrapeLeads } = require("./scraper");
 const { saveRawLeads, logRun } = require("./sheets");
 
 const GEMINI_URL =
