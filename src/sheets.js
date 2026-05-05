@@ -391,6 +391,7 @@ async function hasRunToday() {
 const RAW_SHEET_NAME = "Leads";
 const RAW_HEADER_ROW = [
   "UniqueKey", "Name", "Role", "Category", "Company",
+  "LinkedIn Company URL",
   "Company Size", "Turnover (INR Cr)",
   "Email 1", "Email 2", "Email 3",
   "Source URL", "Snippet", "Date Added"
