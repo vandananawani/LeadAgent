@@ -192,8 +192,17 @@ function parseRawLead(raw) {
 
   if (company === "Unknown" || company === "") {
     // Pattern 2: LinkedIn bullet format "Role · Company · Location"
-    const bulletMatch = snippet.match(/·\s*([A-Z][A-Za-z0-9\s&.,'-]{2,50}?)\s*·/);
-    if (bulletMatch) company = bulletMatch[1].trim();
+    // Must be between two bullets AND not a location/date word
+    const bulletMatches = [...snippet.matchAll(/·\s*([A-Z][A-Za-z0-9\s&.,'-]{2,60}?)\s*·/g)];
+    for (const m of bulletMatches) {
+      const candidate = m[1].trim();
+      // Skip if it looks like a location (India, Mumbai, Delhi etc.) or date
+      if (/^(India|Mumbai|Delhi|Bangalore|Bengaluru|Chennai|Hyderabad|Pune|Kolkata|Noida|Gurgaon|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|\d{4})/i.test(candidate)) continue;
+      // Skip if too short
+      if (candidate.length < 3) continue;
+      company = candidate;
+      break;
+    }
   }
 
   if (company === "Unknown" || company === "") {
@@ -238,9 +247,17 @@ function parseRawLead(raw) {
 
   // ── Clean up company ──
   company = company
-    .replace(/\s*[-–|·•]\s*.*$/, "")
+    .replace(/\s*[-–|·•]\s*.*$/, "")       // remove anything after separator
+    .replace(/\.\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|\d{4}).*$/i, "") // strip dates
+    .replace(/\.\s*(India|Mumbai|Delhi|Bangalore|Bengaluru|Chennai|Pune|Hyderabad|Noida|Gurgaon).*$/i, "") // strip locations
     .replace(/\s+/g, " ")
     .trim();
+
+  // Reject if company is just a location or too short
+  const locationWords = ["india", "mumbai", "delhi", "bangalore", "bengaluru", "chennai", "pune", "hyderabad", "noida", "gurgaon", "kolkata", "south asia", "asia"];
+  if (locationWords.includes(company.toLowerCase()) || company.length < 3) {
+    company = "Unknown";
+  }
 
   // Reject if company looks like a role title accidentally captured
   if (/^(cfo|vp|director|head|chief|finance|manager|officer|president|vice|group)/i.test(company) &&
