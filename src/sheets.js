@@ -391,10 +391,10 @@ async function hasRunToday() {
 const RAW_SHEET_NAME = "Leads";
 const RAW_HEADER_ROW = [
   "UniqueKey", "Name", "Role", "Category", "Company",
-  "LinkedIn Company URL",
   "Company Size", "Turnover (INR Cr)",
+  "Company LinkedIn",
   "Email 1", "Email 2", "Email 3",
-  "Source URL", "Snippet", "Date Added"
+  "Person LinkedIn", "Snippet", "Date Added"
 ];
 
 // ─── Save Raw Leads ────────────────────────────────────────────────────────────
@@ -424,6 +424,7 @@ async function saveRawLeads(leads) {
       lead.company,
       lead.company_size || "Unknown",
       lead.turnover || "Unknown",
+      lead.company_linkedin || "",
       lead.email1 || "",
       lead.email2 || "",
       lead.email3 || "",
