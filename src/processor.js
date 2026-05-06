@@ -134,11 +134,12 @@ function parseRawLead(raw) {
   let role = "Finance Professional";
   let company = "Unknown";
 
-  // Clean title — strip LinkedIn suffix
+  // Clean title — strip LinkedIn suffix and noise
   const cleanTitle = title
     .replace(/\s*[-–|]\s*LinkedIn.*$/i, "")
     .replace(/\s*on LinkedIn.*$/i, "")
     .replace(/\s*\|\s*LinkedIn.*$/i, "")
+    .replace(/\s*·\s*LinkedIn.*$/i, "")
     .trim();
 
   // ── Strategy 1: "Name - Role at Company" ──
@@ -149,9 +150,9 @@ function parseRawLead(raw) {
     company = atMatch[3].trim();
   }
 
-  // ── Strategy 2: "Name - Role | Company" ──
+  // ── Strategy 2: "Name - Role | Company" or "Name - Role, Company" ──
   if (company === "Unknown") {
-    const pipeMatch = cleanTitle.match(/^(.+?)\s*[-–]\s*([^|,]+)\s*[|,]\s*(.+)$/);
+    const pipeMatch = cleanTitle.match(/^(.+?)\s*[-–]\s*([^|,·]{3,60})\s*[|,·]\s*(.{3,})$/);
     if (pipeMatch) {
       name = pipeMatch[1].trim();
       role = pipeMatch[2].trim();
@@ -159,51 +160,91 @@ function parseRawLead(raw) {
     }
   }
 
-  // ── Strategy 3: Extract from snippet ──
-  if (company === "Unknown" || company === "") {
-    // "at Company Name" in snippet
-    const atSnippet = snippet.match(/\bat\s+([A-Z][A-Za-z0-9\s&.,'()-]{2,50}?)(?:\s*[·|·•\n]|$)/);
-    if (atSnippet) company = atSnippet[1].trim();
-
-    // "Company Name | Industry" pattern
-    if (company === "Unknown") {
-      const indMatch = snippet.match(/([A-Z][A-Za-z0-9\s&.,'()-]{2,40}(?:Ltd|Limited|Pvt|Group|Industries|Holdings|Inc|LLC|LLP))/);
-      if (indMatch) company = indMatch[1].trim();
-    }
-  }
-
-  // ── Strategy 4: Extract name from URL ──
+  // ── Strategy 3: "Name - Role" only (no company in title) ──
   if (name === "Unknown") {
-    const urlMatch = url.match(/linkedin\.com\/in\/([^/?]+)/);
-    if (urlMatch) {
-      name = urlMatch[1]
-        .replace(/-\d+$/, "")   // remove trailing -123456
-        .split("-")
-        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-        .join(" ");
+    const simpleMatch = cleanTitle.match(/^(.+?)\s*[-–]\s*(.+)$/);
+    if (simpleMatch) {
+      name = simpleMatch[1].trim();
+      role = simpleMatch[2].trim();
     }
   }
 
-  // Clean up company
-  company = company
-    .replace(/\s*[-–|·•].*$/, "")   // remove anything after separator
+  // ── Strategy 4: Extract name from LinkedIn URL slug ──
+  if (name === "Unknown" || isUsernameSlug(name)) {
+    const urlMatch = url.match(/linkedin\.com\/in\/([^/?#]+)/);
+    if (urlMatch) {
+      const slug = urlMatch[1]
+        .replace(/-\d{4,}$/, "")       // strip trailing IDs: -123456
+        .replace(/-[a-z0-9]{8,}$/, ""); // strip hash suffixes
+      const parts = slug.split("-").filter(p => p.length > 1 && !/^\d+$/.test(p));
+      if (parts.length >= 2) {
+        name = parts.slice(0, 3).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+      }
+    }
+  }
+
+  // ── Strategy 5: Extract company from snippet ──
+  if (company === "Unknown" || company === "") {
+    // "at CompanyName" pattern in snippet
+    const atSnippet = snippet.match(/\bat\s+([A-Z][A-Za-z0-9\s&.,'-]{2,50}?)(?:\s*[·|\n•]|\s*\d|\s{2}|$)/);
+    if (atSnippet) company = atSnippet[1].trim();
+  }
+
+  if (company === "Unknown" || company === "") {
+    // Company with known legal suffixes
+    const suffixMatch = snippet.match(/([A-Z][A-Za-z0-9\s&.,'-]{2,50}(?:Ltd|Limited|Pvt|Private|Group|Industries|Holdings|Inc|Corp|LLP|Bank|Retail|Pharma)\.?)/);
+    if (suffixMatch) company = suffixMatch[1].trim();
+  }
+
+  // ── Clean up name — remove professional titles/suffixes ──
+  name = name
+    .replace(/\b(CA|CFA|CPA|MBA|ACCA|ACA|FCCA|FCA|CMA|CFP|PhD|Dr|Mr|Mrs|Ms|Prof|IAS|IRS)\b\.?/gi, "")
+    .replace(/[|·•,]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
-  // Remove role prefixes accidentally captured in company
-  if (/^(cfo|vp|director|head|chief|finance|manager)/i.test(company)) {
+  // If still looks like a username slug, try URL again
+  if (isUsernameSlug(name)) {
+    const urlMatch = url.match(/linkedin\.com\/in\/([^/?#]+)/);
+    if (urlMatch) {
+      const slug = urlMatch[1].replace(/-\d{4,}$/, "");
+      const parts = slug.split("-").filter(p => p.length > 1 && !/^\d+$/.test(p));
+      if (parts.length >= 2) {
+        name = parts.slice(0, 3).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+      } else {
+        name = "Unknown";
+      }
+    }
+  }
+
+  // ── Clean up role ──
+  role = role
+    .replace(/\s*[-–|·]\s*.*$/, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+
+  // ── Clean up company ──
+  company = company
+    .replace(/\s*[-–|·•]\s*.*$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // Reject if company looks like a role title accidentally captured
+  if (/^(cfo|vp|director|head|chief|finance|manager|officer|president|vice|group)/i.test(company) &&
+      !/(ltd|limited|pvt|group\s+of|industries|holdings)/i.test(company)) {
     company = "Unknown";
   }
 
-  // ── Determine category ──
-  const allText = (role + " " + title + " " + snippet).toLowerCase();
+  // ── Determine category from all available text ──
+  const catText = (role + " " + title + " " + snippet).toLowerCase();
   let category = "Finance Professional";
-  if (/\bcfo\b|chief financial officer/.test(allText)) category = "CFO";
-  else if (/\bgroup cfo\b/.test(allText)) category = "CFO";
-  else if (/\bvp.?finance\b|vice president.{0,10}finance/.test(allText)) category = "VP Finance";
-  else if (/\bfinance head\b|head of finance/.test(allText)) category = "Finance Head";
-  else if (/\bfinance director\b|director.{0,5}finance/.test(allText)) category = "Finance Director";
-  else if (/\bfinance controller\b|controller/.test(allText)) category = "Finance Controller";
+  if (/\bgroup\s+cfo\b/.test(catText)) category = "CFO";
+  else if (/\bcfo\b|chief\s+financial\s+officer/.test(catText)) category = "CFO";
+  else if (/\bvp[\s-]+finance\b|vice\s+president[\s\S]{0,15}finance/.test(catText)) category = "VP Finance";
+  else if (/\bfinance\s+head\b|head\s+of\s+finance/.test(catText)) category = "Finance Head";
+  else if (/\bfinance\s+director\b|director[\s\S]{0,10}finance/.test(catText)) category = "Finance Director";
+  else if (/\bfinance\s+controller\b|\bcontroller\b/.test(catText)) category = "Finance Controller";
 
   const emails = predictEmails(name, company);
   const turnover = estimateTurnover(company, snippet);
@@ -211,8 +252,8 @@ function parseRawLead(raw) {
   const companyLinkedIn = buildCompanyLinkedInUrl(company);
 
   return {
-    name,
-    role: role.slice(0, 100),
+    name: name || "Unknown",
+    role: role || "Finance Professional",
     company: company || "Unknown",
     category,
     company_size: companySize,
@@ -224,6 +265,13 @@ function parseRawLead(raw) {
     source_url: url,
     snippet: snippet.slice(0, 250),
   };
+}
+
+// Returns true if string looks like a username slug not a real name
+function isUsernameSlug(str) {
+  if (!str || str === "Unknown") return true;
+  // Has digits mixed with letters and no spaces = likely slug
+  return /\d/.test(str) && !/\s/.test(str);
 }
 
 // ─── Main Pipeline ─────────────────────────────────────────────────────────────
