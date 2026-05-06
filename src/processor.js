@@ -185,13 +185,25 @@ function parseRawLead(raw) {
 
   // ── Strategy 5: Extract company from snippet ──
   if (company === "Unknown" || company === "") {
-    // "at CompanyName" pattern in snippet
-    const atSnippet = snippet.match(/\bat\s+([A-Z][A-Za-z0-9\s&.,'-]{2,50}?)(?:\s*[·|\n•]|\s*\d|\s{2}|$)/);
+    // Pattern 1: "at Company Name" in snippet
+    const atSnippet = snippet.match(/\bat\s+([A-Z][A-Za-z0-9\s&.,'-]{2,50}?)(?:\.|,|\s{2}|·|\n|$)/);
     if (atSnippet) company = atSnippet[1].trim();
   }
 
   if (company === "Unknown" || company === "") {
-    // Company with known legal suffixes
+    // Pattern 2: LinkedIn bullet format "Role · Company · Location"
+    const bulletMatch = snippet.match(/·\s*([A-Z][A-Za-z0-9\s&.,'-]{2,50}?)\s*·/);
+    if (bulletMatch) company = bulletMatch[1].trim();
+  }
+
+  if (company === "Unknown" || company === "") {
+    // Pattern 3: "Role - Company" in snippet
+    const dashSnippet = snippet.match(/(?:CFO|Finance|Director|Controller|VP|Head|Officer)[^-–]{0,30}[-–]\s*([A-Z][A-Za-z0-9\s&.,'-]{2,50})/);
+    if (dashSnippet) company = dashSnippet[1].trim();
+  }
+
+  if (company === "Unknown" || company === "") {
+    // Pattern 4: Company with known legal suffixes anywhere in snippet
     const suffixMatch = snippet.match(/([A-Z][A-Za-z0-9\s&.,'-]{2,50}(?:Ltd|Limited|Pvt|Private|Group|Industries|Holdings|Inc|Corp|LLP|Bank|Retail|Pharma)\.?)/);
     if (suffixMatch) company = suffixMatch[1].trim();
   }
