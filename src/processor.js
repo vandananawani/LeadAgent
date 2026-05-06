@@ -1,109 +1,64 @@
 "use strict";
 
+const axios = require("axios");
 const { scrapeLeads } = require("./scraper");
 const { saveRawLeads, logRun } = require("./sheets");
 
-// ─── India Detection ───────────────────────────────────────────────────────────
-// Detects whether a lead is India-based from snippet, title, and location signals.
-const INDIA_KEYWORDS = [
-  "india", "indian", "mumbai", "delhi", "new delhi", "bangalore", "bengaluru",
-  "hyderabad", "chennai", "pune", "kolkata", "ahmedabad", "surat", "jaipur",
-  "lucknow", "kanpur", "nagpur", "indore", "thane", "bhopal", "visakhapatnam",
-  "pimpri", "patna", "vadodara", "ghaziabad", "ludhiana", "agra", "nashik",
-  "faridabad", "meerut", "rajkot", "kalyan", "vasai", "varanasi", "srinagar",
-  "aurangabad", "dhanbad", "amritsar", "navi mumbai", "allahabad", "howrah",
-  "ranchi", "coimbatore", "jabalpur", "gwalior", "vijayawada", "jodhpur",
-  "madurai", "raipur", "kota", "gurgaon", "gurugram", "noida", "chandigarh",
-  "trivandrum", "thiruvananthapuram", "kochi", "cochin", "bhubaneswar",
-  "pvt ltd", "private limited", "pvt. ltd", "ltd india", "india pvt",
-  "nse", "bse", "sensex", "nifty", "sebi", "rbi", "inr", "crore",
-  "rupee", "indian rupee", "tata", "reliance", "infosys", "wipro", "hcl",
-  "mahindra", "bajaj", "birla", "adani", "ambani"
-];
+// ─── Heuristic Turnover Estimator (no API needed) ─────────────────────────────
+function estimateTurnover(company, snippet) {
+  const text = (company + " " + snippet).toLowerCase();
 
-const NON_INDIA_KEYWORDS = [
-  "singapore", "dubai", "uae", "united arab emirates", "usa", "united states",
-  "uk", "united kingdom", "london", "new york", "california", "australia",
-  "canada", "malaysia", "hong kong", "germany", "france", "netherlands",
-  "bahrain", "kuwait", "qatar", "saudi arabia", "riyadh", "abu dhabi",
-  "san francisco", "chicago", "los angeles", "toronto",
-  "sydney", "melbourne", "johannesburg", "kenya", "nigeria", "bangladesh",
-  "pakistan", "sri lanka", "nepal", "doha"
-];
+  // Large enterprise signals
+  if (/\b(group|holdings|industries|enterprises|conglomerate)\b/.test(text) &&
+      /\b(ltd|limited|pvt)\b/.test(text)) return "500–2000 Cr";
+  if (/\b(group|holdings|industries)\b/.test(text)) return "200–2000 Cr";
 
-function isIndiaLead(name, company, role, snippet, title) {
-  const allText = [name, company, role, snippet, title]
-    .join(" ")
-    .toLowerCase();
+  // Listed / large company signals
+  if (/\b(bse|nse|listed|ipo|public limited)\b/.test(text)) return "500+ Cr";
+  if (/\b(bank|insurance|nbfc|financial services)\b/.test(text)) return "1000+ Cr";
+  if (/\b(hospital|healthcare|pharma|pharmaceutical)\b/.test(text)) return "100–500 Cr";
+  if (/\b(infrastructure|construction|epc|power|energy|oil|steel|cement)\b/.test(text)) return "200–1000 Cr";
+  if (/\b(retail|fmcg|consumer|goods|food|beverage)\b/.test(text)) return "100–500 Cr";
+  if (/\b(manufacturing|automobile|auto|textile|garment)\b/.test(text)) return "50–500 Cr";
+  if (/\b(it|software|technology|tech|digital|saas|startup)\b/.test(text)) return "10–200 Cr";
+  if (/\b(logistics|supply chain|warehouse|transport)\b/.test(text)) return "50–200 Cr";
+  if (/\b(real estate|realty|property|developer|builder)\b/.test(text)) return "100–500 Cr";
 
-  // Hard exclude: if strong non-India signals present
-  for (const kw of NON_INDIA_KEYWORDS) {
-    if (allText.includes(kw)) return false;
-  }
-
-  // Accept: if any India signal present
-  for (const kw of INDIA_KEYWORDS) {
-    if (allText.includes(kw)) return true;
-  }
-
-  // Ambiguous: include (search queries already target India)
-  return true;
-}
-
-// ─── Company Name Sanitizer ────────────────────────────────────────────────────
-function sanitizeCompany(raw) {
-  if (!raw) return "Unknown";
-  return raw
-    .trim()
-    .replace(/\s*[|–\-]+\s*$/, "")
-    .replace(/\s*[-–|]\s*LinkedIn.*$/i, "")
-    .replace(/\s*on LinkedIn.*$/i, "")
-    .replace(/[.,]+$/, "")
-    .trim() || "Unknown";
-}
-
-// ─── Company Extraction ────────────────────────────────────────────────────────
-// Extracts the best possible company name from the title and snippet.
-function extractCompany(cleanTitle, snippet) {
-  // Pattern 1: "Name - Role at Company Name"
-  const atPattern = cleanTitle.match(/^.+?\s*[-–]\s*.+?\s+(?:at|@)\s+(.+)$/i);
-  if (atPattern) return sanitizeCompany(atPattern[1]);
-
-  // Pattern 2: "Name - Role | Company" or "Name - Role , Company"
-  const pipePattern = cleanTitle.match(/^.+?\s*[-–]\s*.+?\s*[|,]\s*(.+)$/i);
-  if (pipePattern) return sanitizeCompany(pipePattern[1]);
-
-  // Pattern 3: snippet "at <Company>" with Indian company suffixes
-  const snippetAt = snippet.match(
-    /\bat\s+([A-Z][A-Za-z0-9&\s'.,-]{2,60}?(?:Pvt\.?\s*Ltd\.?|Private\s+Limited|Ltd\.?|Limited|Group|Holdings|Industries|Enterprises|Solutions|Services|Technologies|Tech|Corp\.?|Inc\.?|LLP|LLC)?)\b/
-  );
-  if (snippetAt) return sanitizeCompany(snippetAt[1]);
-
-  // Pattern 4: snippet "company/employer: <Name>"
-  const snippetCompany = snippet.match(
-    /(?:company|organization|employer|firm|work(?:ing)?\s+(?:at|with|for))[\s:]+([A-Z][A-Za-z0-9&\s'.,-]{2,60})/i
-  );
-  if (snippetCompany) return sanitizeCompany(snippetCompany[1]);
+  // Company type signals
+  if (/\bpvt\.?\s*ltd\b/.test(text)) return "10–100 Cr";
+  if (/\bltd\b|\blimited\b/.test(text)) return "100–500 Cr";
+  if (/\bllp\b/.test(text)) return "5–50 Cr";
 
   return "Unknown";
 }
 
-// ─── LinkedIn Company Page URL Builder ────────────────────────────────────────
-// Constructs a best-effort LinkedIn company URL from the company name.
-// Uses slug-style URL — covers most companies registered on LinkedIn.
-function buildLinkedInCompanyUrl(company) {
-  if (!company || company === "Unknown") return "";
+function estimateCompanySize(company, snippet) {
+  const text = (company + " " + snippet).toLowerCase();
 
+  if (/\b(group|holdings|conglomerate)\b/.test(text) &&
+      /\b(ltd|limited)\b/.test(text)) return "5000+ employees";
+  if (/\b(group|holdings|industries|enterprises)\b/.test(text)) return "1000–10000 employees";
+  if (/\b(bank|insurance|listed|bse|nse)\b/.test(text)) return "1000+ employees";
+  if (/\b(manufacturing|pharma|hospital|infrastructure)\b/.test(text)) return "500–5000 employees";
+  if (/\b(retail|fmcg|logistics|construction)\b/.test(text)) return "200–2000 employees";
+  if (/\b(it|software|tech|saas|startup|digital)\b/.test(text)) return "50–500 employees";
+  if (/\bpvt\.?\s*ltd\b/.test(text)) return "50–500 employees";
+  if (/\bltd\b|\blimited\b/.test(text)) return "200–2000 employees";
+
+  return "Unknown";
+}
+
+// ─── Company LinkedIn URL ──────────────────────────────────────────────────────
+function buildCompanyLinkedInUrl(company) {
+  if (!company || company === "Unknown") return "";
   const slug = company
     .toLowerCase()
-    .replace(/\b(pvt\.?\s*ltd\.?|private\s+limited|ltd\.?|limited|inc\.?|corp\.?|llp|llc|group|holdings|industries|enterprises|solutions|services|technologies|tech)\b/gi, "")
-    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\b(pvt|private|ltd|limited|inc|llc|llp|group|holdings|industries|enterprises|solutions|services|technologies|tech|india|global|international|and|&)\b/gi, "")
+    .replace(/[^a-z0-9\s]/g, "")
     .trim()
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 50);
-
+    .replace(/^-|-$/g, "");
   if (!slug || slug.length < 2) return "";
   return `https://www.linkedin.com/company/${slug}`;
 }
@@ -112,18 +67,18 @@ function buildLinkedInCompanyUrl(company) {
 function predictEmails(name, company) {
   if (!name || name === "Unknown" || !company || company === "Unknown") return [];
   const cleanName = name
-    .replace(/\b(Mr|Mrs|Ms|Dr|Prof|CA|CFA|CPA|MBA|IAS|IPS)\b\.?/gi, "")
+    .replace(/\b(Mr|Mrs|Ms|Dr|Prof|CA|CFA|CPA|MBA|ACCA|ACA)\b\.?/gi, "")
     .trim();
   const parts = cleanName.split(/\s+/).filter(Boolean);
   if (parts.length < 2) return [];
   const first = parts[0].toLowerCase().replace(/[^a-z]/g, "");
   const last = parts[parts.length - 1].toLowerCase().replace(/[^a-z]/g, "");
-  const firstInitial = first[0] || "";
+  if (!first || !last) return [];
   const domain = guessDomain(company);
   if (!domain) return [];
   return [
     `${first}.${last}@${domain}`,
-    `${firstInitial}${last}@${domain}`,
+    `${first[0]}${last}@${domain}`,
     `${first}@${domain}`,
   ];
 }
@@ -132,7 +87,7 @@ function guessDomain(company) {
   if (!company || company === "Unknown") return null;
   const clean = company
     .toLowerCase()
-    .replace(/\b(pvt|private|ltd|limited|inc|llc|llp|group|holdings|industries|enterprises|solutions|services|technologies|tech|india|global|international|corp|corporation)\b/gi, "")
+    .replace(/\b(pvt|private|ltd|limited|inc|llc|llp|group|holdings|industries|enterprises|solutions|services|technologies|tech|india|global|international|and|&)\b/gi, "")
     .replace(/[^a-z0-9\s]/g, "")
     .trim()
     .replace(/\s+/g, "");
@@ -140,121 +95,161 @@ function guessDomain(company) {
   return `${clean}.com`;
 }
 
-// ─── Parse Raw Lead from Search Result ────────────────────────────────────────
+// ─── India Filter ──────────────────────────────────────────────────────────────
+function isIndiaBased(raw) {
+  const text = (raw.title + " " + raw.description + " " + raw.url).toLowerCase();
+
+  // Must be LinkedIn URL
+  if (!raw.url.includes("linkedin.com")) return false;
+
+  // Exclude obvious non-India countries
+  const excludeCountries = [
+    "usa", "united states", "uk", "united kingdom", "canada", "australia",
+    "singapore", "dubai", "uae", "germany", "france", "netherlands",
+    "new zealand", "south africa", "kenya", "nigeria", "pakistan",
+    "bangladesh", "sri lanka", "malaysia", "indonesia", "philippines",
+  ];
+  for (const country of excludeCountries) {
+    if (text.includes(country)) return false;
+  }
+
+  // Positive India signals — at least one must be present
+  const indiaSignals = [
+    "india", "indian", "mumbai", "delhi", "bangalore", "bengaluru",
+    "chennai", "hyderabad", "pune", "kolkata", "ahmedabad", "surat",
+    "jaipur", "lucknow", "noida", "gurgaon", "gurugram", "chandigarh",
+    "pvt ltd", "pvt. ltd", "private limited", "crore", "inr", "rupee",
+    "in.linkedin.com",
+  ];
+  return indiaSignals.some((signal) => text.includes(signal));
+}
+
+// ─── Parse Raw Lead ────────────────────────────────────────────────────────────
 function parseRawLead(raw) {
-  const title   = raw.title       || "";
-  const url     = raw.url         || "";  // LinkedIn profile URL — kept as-is
+  const title = raw.title || "";
+  const url = raw.url || "";
   const snippet = raw.description || "";
 
-  let name    = "Unknown";
-  let role    = "Finance Professional";
+  let name = "Unknown";
+  let role = "Finance Professional";
   let company = "Unknown";
 
-  // Strip LinkedIn suffix from title
+  // Clean title — strip LinkedIn suffix
   const cleanTitle = title
-    .replace(/\s*[\|–-]\s*LinkedIn.*$/i, "")
+    .replace(/\s*[-–|]\s*LinkedIn.*$/i, "")
     .replace(/\s*on LinkedIn.*$/i, "")
+    .replace(/\s*\|\s*LinkedIn.*$/i, "")
     .trim();
 
-  // ── Extract Name + Role + Company ─────────────────────────────────────────
-  // Pattern 1: "Name - Role at Company"
-  const dashAtMatch = cleanTitle.match(/^(.+?)\s*[-–]\s*(.+?)\s+(?:at|@)\s+(.+)$/i);
-  if (dashAtMatch) {
-    name    = dashAtMatch[1].trim();
-    role    = dashAtMatch[2].trim();
-    company = sanitizeCompany(dashAtMatch[3]);
-  } else {
-    // Pattern 2: "Name - Role | Company" or "Name - Role , Company"
-    const pipeMatch = cleanTitle.match(/^(.+?)\s*[-–]\s*(.+?)\s*[\|,]\s*(.+)$/i);
+  // ── Strategy 1: "Name - Role at Company" ──
+  const atMatch = cleanTitle.match(/^(.+?)\s*[-–]\s*(.+?)\s+(?:at|@)\s+(.+)$/i);
+  if (atMatch) {
+    name = atMatch[1].trim();
+    role = atMatch[2].trim();
+    company = atMatch[3].trim();
+  }
+
+  // ── Strategy 2: "Name - Role | Company" ──
+  if (company === "Unknown") {
+    const pipeMatch = cleanTitle.match(/^(.+?)\s*[-–]\s*([^|,]+)\s*[|,]\s*(.+)$/);
     if (pipeMatch) {
-      name    = pipeMatch[1].trim();
-      role    = pipeMatch[2].trim();
-      company = sanitizeCompany(pipeMatch[3]);
-    } else {
-      // Pattern 3: Just grab name from first segment, role + company from snippet
-      name = cleanTitle.split(/[-–|]/)[0].trim() || "Unknown";
-      const roleMatch = snippet.match(
-        /\b(CFO|Chief Financial Officer|Finance Head|VP Finance|Director Finance|Finance Director|Head of Finance|Finance Controller|Group CFO|Chief Finance Officer)\b/i
-      );
-      if (roleMatch) role = roleMatch[1];
+      name = pipeMatch[1].trim();
+      role = pipeMatch[2].trim();
+      company = pipeMatch[3].trim();
     }
   }
 
-  // ── If company still unknown, use richer extractor ─────────────────────────
-  if (!company || company === "Unknown" || company.length < 2) {
-    company = extractCompany(cleanTitle, snippet);
+  // ── Strategy 3: Extract from snippet ──
+  if (company === "Unknown" || company === "") {
+    // "at Company Name" in snippet
+    const atSnippet = snippet.match(/\bat\s+([A-Z][A-Za-z0-9\s&.,'()-]{2,50}?)(?:\s*[·|·•\n]|$)/);
+    if (atSnippet) company = atSnippet[1].trim();
+
+    // "Company Name | Industry" pattern
+    if (company === "Unknown") {
+      const indMatch = snippet.match(/([A-Z][A-Za-z0-9\s&.,'()-]{2,40}(?:Ltd|Limited|Pvt|Group|Industries|Holdings|Inc|LLC|LLP))/);
+      if (indMatch) company = indMatch[1].trim();
+    }
   }
 
-  // Final cleanup of company
+  // ── Strategy 4: Extract name from URL ──
+  if (name === "Unknown") {
+    const urlMatch = url.match(/linkedin\.com\/in\/([^/?]+)/);
+    if (urlMatch) {
+      name = urlMatch[1]
+        .replace(/-\d+$/, "")   // remove trailing -123456
+        .split("-")
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(" ");
+    }
+  }
+
+  // Clean up company
   company = company
-    .replace(/\s*[\|–-]\s*LinkedIn.*$/i, "")
-    .replace(/\s*on LinkedIn.*$/i, "")
-    .replace(/\s*[-–|]\s*$/, "")
+    .replace(/\s*[-–|·•].*$/, "")   // remove anything after separator
+    .replace(/\s+/g, " ")
     .trim();
 
-  if (!company) company = "Unknown";
+  // Remove role prefixes accidentally captured in company
+  if (/^(cfo|vp|director|head|chief|finance|manager)/i.test(company)) {
+    company = "Unknown";
+  }
 
-  // ── Category ───────────────────────────────────────────────────────────────
-  const roleLower = (role + " " + title).toLowerCase();
+  // ── Determine category ──
+  const allText = (role + " " + title + " " + snippet).toLowerCase();
   let category = "Finance Professional";
-  if (/\bcfo\b|chief financial/.test(roleLower))               category = "CFO";
-  else if (/vp finance|vice president finance/.test(roleLower)) category = "VP Finance";
-  else if (/finance head|head of finance/.test(roleLower))      category = "Finance Head";
-  else if (/finance director|director finance/.test(roleLower)) category = "Finance Director";
-  else if (/finance controller|controller/.test(roleLower))     category = "Finance Controller";
-  else if (/group cfo/.test(roleLower))                         category = "Group CFO";
+  if (/\bcfo\b|chief financial officer/.test(allText)) category = "CFO";
+  else if (/\bgroup cfo\b/.test(allText)) category = "CFO";
+  else if (/\bvp.?finance\b|vice president.{0,10}finance/.test(allText)) category = "VP Finance";
+  else if (/\bfinance head\b|head of finance/.test(allText)) category = "Finance Head";
+  else if (/\bfinance director\b|director.{0,5}finance/.test(allText)) category = "Finance Director";
+  else if (/\bfinance controller\b|controller/.test(allText)) category = "Finance Controller";
 
-  // ── India filter flag ──────────────────────────────────────────────────────
-  const _indiaPass = isIndiaLead(name, company, role, snippet, title);
-
-  // ── LinkedIn company page URL ──────────────────────────────────────────────
-  const linkedin_company_url = buildLinkedInCompanyUrl(company);
-
-  // ── Email predictions ──────────────────────────────────────────────────────
   const emails = predictEmails(name, company);
+  const turnover = estimateTurnover(company, snippet);
+  const companySize = estimateCompanySize(company, snippet);
+  const companyLinkedIn = buildCompanyLinkedInUrl(company);
 
   return {
     name,
-    role,
-    company,
+    role: role.slice(0, 100),
+    company: company || "Unknown",
     category,
-    company_size: "Unknown",
-    turnover:     "Unknown",
-    linkedin_company_url,
+    company_size: companySize,
+    turnover,
+    company_linkedin: companyLinkedIn,
     email1: emails[0] || "",
     email2: emails[1] || "",
     email3: emails[2] || "",
-    source_url: url,   // LinkedIn profile URL — untouched
-    snippet:    snippet.slice(0, 200),
-    _indiaPass,
+    source_url: url,
+    snippet: snippet.slice(0, 250),
   };
 }
 
 // ─── Main Pipeline ─────────────────────────────────────────────────────────────
 async function runPipeline() {
   const startTime = Date.now();
-  const location  = process.env.TARGET_LOCATION || "India";
-  const today     = new Date().toISOString().split("T")[0];
+  const location = process.env.TARGET_LOCATION || "India";
+  const today = new Date().toISOString().split("T")[0];
 
   const stats = {
-    date:            today,
-    rawCount:        0,
-    afterAI:         0,
-    afterDedup:      0,
-    saved:           0,
+    date: today,
+    rawCount: 0,
+    afterAI: 0,
+    afterDedup: 0,
+    saved: 0,
     durationSeconds: 0,
-    status:          "FAILED",
+    status: "FAILED",
   };
 
   console.log("=".repeat(60));
-  console.log(`[Pipeline] Starting CFO Lead Generation — ${today}`);
+  console.log(`[Pipeline] Starting CFO lead generation — ${today}`);
   console.log(`[Pipeline] Target location: ${location}`);
-  console.log(`[Pipeline] Mode: India-filtered | Company URL enriched | No Gemini`);
   console.log("=".repeat(60));
 
   try {
-    // ── STEP 1: Scrape ─────────────────────────────────────────────────────
-    console.log("\n[Step 1/2] Scraping leads from Google...");
+    // ── STEP 1: Scrape ─────────────────────────────────────────
+    console.log("\n[Step 1/2] Scraping leads...");
     const rawLeads = await scrapeLeads(location);
     stats.rawCount = rawLeads.length;
 
@@ -265,37 +260,28 @@ async function runPipeline() {
       return stats;
     }
 
-    console.log(`[Step 1/2] ✅ ${rawLeads.length} raw leads scraped\n`);
+    // Filter India-based only
+    const indiaLeads = rawLeads.filter(isIndiaBased);
+    console.log(`[Step 1/2] ✅ ${rawLeads.length} total → ${indiaLeads.length} India-based leads\n`);
 
-    // ── STEP 2: Parse + Filter ─────────────────────────────────────────────
-    console.log("[Step 2/2] Parsing leads, applying India filter, building company URLs...");
+    // ── STEP 2: Parse + Save ────────────────────────────────────
+    console.log("[Step 2/2] Parsing and saving to Google Sheets...");
+    const parsedLeads = indiaLeads.map(parseRawLead);
+    stats.afterAI = parsedLeads.length;
 
-    const allParsed = rawLeads.map(parseRawLead);
-    stats.afterAI = allParsed.length;
-
-    // Strict India-only filter
-    const indiaLeads = allParsed.filter(l => l._indiaPass);
-    const excluded   = allParsed.length - indiaLeads.length;
-    console.log(`[Filter]   ${indiaLeads.length} India-based kept, ${excluded} non-India excluded`);
-
-    // Remove internal flag before saving
-    indiaLeads.forEach(l => delete l._indiaPass);
-
-    // Log sample output
+    // Print sample
     console.log("\n  SAMPLE LEADS:");
-    indiaLeads.slice(0, 5).forEach((lead, i) => {
-      console.log(`  ${i + 1}. ${lead.name} — ${lead.role} @ ${lead.company}`);
-      console.log(`       Profile:      ${lead.source_url}`);
-      console.log(`       Company Page: ${lead.linkedin_company_url || "(not found)"}`);
+    parsedLeads.slice(0, 5).forEach((lead, i) => {
+      console.log(`  ${i + 1}. ${lead.name} — ${lead.role} @ ${lead.company} | Turnover: ${lead.turnover}`);
     });
     console.log("");
 
-    const saved = await saveRawLeads(indiaLeads);
-    stats.afterDedup = indiaLeads.length;
-    stats.saved      = saved;
-    stats.status     = "SUCCESS";
+    const saved = await saveRawLeads(parsedLeads);
+    stats.afterDedup = parsedLeads.length;
+    stats.saved = saved;
+    stats.status = "SUCCESS";
 
-    console.log(`[Step 2/2] ✅ ${saved} new India-based leads saved to Google Sheets\n`);
+    console.log(`[Step 2/2] ✅ ${saved} new leads saved\n`);
 
   } catch (err) {
     console.error(`\n[Pipeline] ❌ Fatal error: ${err.message}`);
@@ -325,8 +311,7 @@ function printFinalSummary(stats) {
   console.log("=".repeat(60));
   console.log(`  Status:      ${stats.status}`);
   console.log(`  Raw scraped: ${stats.rawCount}`);
-  console.log(`  Parsed:      ${stats.afterAI}`);
-  console.log(`  India-only:  ${stats.afterDedup}`);
+  console.log(`  India leads: ${stats.afterAI}`);
   console.log(`  Saved:       ${stats.saved}`);
   console.log(`  Duration:    ${stats.durationSeconds}s`);
   console.log("=".repeat(60) + "\n");
